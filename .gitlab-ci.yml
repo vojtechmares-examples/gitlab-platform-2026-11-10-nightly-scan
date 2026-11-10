@@ -1,0 +1,106 @@
+# Nightly vulnerability scan. A pipeline schedule runs it at midnight (Europe/Prague); you can also start it by hand.
+#   test      the report script's unit tests (every push and merge request)
+#   discover  per environment: which images run on the deploy server (plus the base images)
+#   scan      Trivy scans each of them
+#   report    findings with a CVSS score of at least 9.0 become ServiceNow tasks (a dry run until SERVICENOW_URL is set)
+# staging is informational (the report is an artifact); production is where tasks are opened.
+
+include:
+  - project: examples/ci-templates
+    ref: main
+    file: /rocky.yml
+
+stages: [test, discover, scan, report]
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "web"
+
+# Scan stages run for schedules and by hand, never for an ordinary push
+.nightly:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "web"
+
+test:
+  stage: test
+  image: rockylinux/rockylinux:10
+  before_script:
+    - !reference [.rocky-dnf, before_script]
+    - dnf -y -q install python3
+  script:
+    - python3 -m unittest discover -s tests -v
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "schedule"
+
+discover:
+  extends: .nightly
+  stage: discover
+  image: rockylinux/rockylinux:10
+  parallel:
+    matrix:
+      - ENVIRONMENT: [staging, production]
+  before_script:
+    - !reference [.rocky-dnf, before_script]
+    - dnf -y -q install openssh-clients
+    - !reference [.ssh-setup, before_script]
+  script:
+    - scripts/deployed-images.sh $ENVIRONMENT | tee deployed.txt
+    - cat targets/base-images.txt deployed.txt > targets-$ENVIRONMENT.txt
+    # the canary only runs in the production scan
+    - if [ "$ENVIRONMENT" = production ]; then cat targets/production-canary.txt >> targets-$ENVIRONMENT.txt; fi
+    - grep -v -e '^#' -e '^$' targets-$ENVIRONMENT.txt
+  artifacts:
+    paths: [targets-*.txt]
+    expire_in: 1 week
+
+scan:
+  extends: .nightly
+  stage: scan
+  parallel:
+    matrix:
+      - ENVIRONMENT: [staging, production]
+  needs: [discover]
+  image:
+    name: $CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX/aquasec/trivy:0.76.2
+    entrypoint: [""]
+  variables:
+    TRIVY_CACHE_DIR: "$CI_PROJECT_DIR/.trivycache"
+    TRIVY_DB_REPOSITORY: "public.ecr.aws/aquasecurity/trivy-db:2,ghcr.io/aquasecurity/trivy-db:2"
+    TRIVY_NO_PROGRESS: "true"
+    # read access to the registries of the examples group (a group deploy token, set with glab)
+    TRIVY_USERNAME: $SCAN_REGISTRY_USER
+    TRIVY_PASSWORD: $SCAN_REGISTRY_TOKEN
+  cache:
+    key: trivy
+    paths: [.trivycache/]
+  script:
+    - REPORT_DIR=reports-$ENVIRONMENT scripts/scan.sh targets-$ENVIRONMENT.txt
+  artifacts:
+    paths: [reports-*/]
+    expire_in: 1 week
+
+report:
+  extends: .nightly
+  stage: report
+  parallel:
+    matrix:
+      - ENVIRONMENT: [staging, production]
+  needs: [scan]
+  image: rockylinux/rockylinux:10
+  environment:
+    name: $ENVIRONMENT
+    action: access
+  before_script:
+    - !reference [.rocky-dnf, before_script]
+    - dnf -y -q install python3
+  script:
+    # Without SERVICENOW_URL this is a dry run. In production the three variables SERVICENOW_URL, SERVICENOW_USER and
+    # SERVICENOW_PASSWORD (scoped to the production environment) turn it into real tasks.
+    - python3 scripts/servicenow_report.py reports-$ENVIRONMENT/*.json --output servicenow-tasks-$ENVIRONMENT.json
+  artifacts:
+    paths: [servicenow-tasks-*.json]
+    expire_in: 4 weeks

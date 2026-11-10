@@ -1,0 +1,5 @@
+# Base images that the applications of the examples group are built on (scanned in every environment).
+# One image per line, anything Trivy can pull; lines starting with # are ignored.
+rockylinux/rockylinux:10
+mcr.microsoft.com/dotnet/aspnet:10.0
+postgres:16
