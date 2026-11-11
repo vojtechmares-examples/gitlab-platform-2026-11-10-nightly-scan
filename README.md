@@ -13,3 +13,23 @@ vulnerabilities with a CVSS score of **9.0 or higher**.
 | Environments | `staging` is informational, `production` is where tasks are opened |
 
 The report script has unit tests (`tests/`, run on every push) that cover the 9.0 threshold, the v2 fallback and the task payload.
+
+## CI configuration
+
+The scheduled jobs read the CI/CD variables below (*Settings > CI/CD > Variables*). Variables that start with `CI_` are predefined by GitLab.
+
+| Variable | Set on | Type | Used for |
+|----------|--------|------|----------|
+| `DEPLOY_HOST` | group `examples` | Variable | Address of the deploy server; `discover` reads the deployed images from it |
+| `DEPLOY_SSH_PORT` | group `examples` | Variable | SSH port of the deploy server (`6022`) |
+| `DEPLOY_USER` | group `examples` | Variable | Account the pipelines log in as (`deploy`) |
+| `SSH_KNOWN_HOSTS` | group `examples` | Variable | Host keys of the deploy server; the connection uses `StrictHostKeyChecking yes` |
+| `SSH_PRIVATE_KEY` | group `examples` | File, **protected** | Private key of the `deploy` account |
+| `SCAN_REGISTRY_USER` | this project | Variable | User name of a group deploy token of `examples` (scope `read_registry`) |
+| `SCAN_REGISTRY_TOKEN` | this project | Variable, **masked** | The token itself. `scan` passes both to Trivy (`TRIVY_USERNAME`, `TRIVY_PASSWORD`) to pull the deployed images from the project registries |
+| `SERVICENOW_URL` | optional, this project, scope `production` | Variable | Base URL of the ServiceNow instance. Without it `report` is a dry run |
+| `SERVICENOW_USER`, `SERVICENOW_PASSWORD` | optional, this project, scope `production` | Variable (mask the password) | Credentials for the Table API |
+| `SERVICENOW_TABLE` | optional, this project, scope `production` | Variable | Table that receives the tasks (default `task`) |
+
+The group variables are inherited by every project in the `examples` group, so nothing has to be set for them here. The `.ssh-setup` snippet of `examples/ci-templates` turns the first five into `ssh deploy`.
+The schedule runs on `main`, which is protected, so the protected `SSH_PRIVATE_KEY` reaches it. The `report` job runs in the environment `production` (and `staging`), which is what makes the variables scoped to `production` visible to it.
